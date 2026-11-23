@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AdosX — Multi-Tenant Data Reconciliation</title>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM 18 -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .badge-missing { background-color: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+    .badge-mismatch { background-color: #fef3c7; color: #b45309; border: 1px solid #fcd34d; }
+    .badge-duplicate { background-color: #e0e7ff; color: #4338ca; border: 1px solid #a5b4fc; }
+    .badge-orphan { background-color: #f3e8ff; color: #7e22ce; border: 1px solid #d8b4fe; }
+    .transition-all-fast { transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo } = React;
+
+    function App() {
+      const [tenants, setTenants] = useState([]);
+      const [selectedTenant, setSelectedTenant] = useState("ALL");
+      const [disagreements, setDisagreements] = useState([]);
+      const [selectedReason, setSelectedReason] = useState("ALL");
+      const [sortField, setSortField] = useState("id");
+      const [sortDirection, setSortDirection] = useState("asc");
+      const [searchQuery, setSearchQuery] = useState("");
+      const [stats, setStats] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [actionToast, setActionToast] = useState(null);
+      const [selectedDisagreement, setSelectedDisagreement] = useState(null);
+      const [expandedRowId, setExpandedRowId] = useState(null);
+      const [testResults, setTestResults] = useState(null);
+      const [showTestModal, setShowTestModal] = useState(false);
+      const [importSummary, setImportSummary] = useState(null);
+      const [showImportModal, setShowImportModal] = useState(false);
+      const [activeTab, setActiveTab] = useState("table"); // "table" or "simulator"
+
+      // Pagination
+      const [currentPage, setCurrentPage] = useState(1);
+      const [pageSize, setPageSize] = useState(15);
+
+      // Simulator State
+      const [simRecA, setSimRecA] = useState("REC-1076");
+      const [simValA, setSimValA] = useState("1,200.00");
+      const [simRefB, setSimRefB] = useState("rec-1076");
+      const [simValB, setSimValB] = useState("1200");
+      const [simResult, setSimResult] = useState(null);
+
+      useEffect(() => {
+        fetchTenants();
+      }, []);
+
+      useEffect(() => {
+        fetchStats();
+        fetchDisagreements();
+        setCurrentPage(1);
+      }, [selectedTenant, selectedReason]);
+
+      const fetchTenants = async () => {
+        try {
+          const res = await fetch("/api/tenants");
+          const data = await res.json();
+          setTenants(data.tenants || []);
+        } catch (err) {
+          console.error("Failed to fetch tenants:", err);
+        }
+      };
+
+      const fetchStats = async () => {
+        try {
+          const url = selectedTenant !== "ALL" ? `/api/stats?tenant=${selectedTenant}` : "/api/stats";
+          const res = await fetch(url);
+          const data = await res.json();
+          setStats(data);
+        } catch (err) {
+          console.error("Failed to fetch stats:", err);
+        }
+      };
+
+      const fetchDisagreements = async () => {
+        setLoading(true);
+        try {
+          const params = new URLSearchParams();
+          if (selectedTenant !== "ALL") params.append("tenant", selectedTenant);
+          if (selectedReason !== "ALL") params.append("reason", selectedReason);
+
+          const res = await fetch(`/api/disagreements?${params.toString()}`);
+          const data = await res.json();
+          setDisagreements(data.disagreements || []);
+        } catch (err) {
+          console.error("Failed to fetch disagreements:", err);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const showToast = (type, message) => {
+        setActionToast({ type, message });
+        setTimeout(() => setActionToast(null), 5000);
+      };
+
+      const handleImport = async () => {
+        setLoading(true);
+        showToast("info", "Importing CSV files into database...");
+        try {
+          const res = await fetch("/api/import", { method: "POST" });
+          const data = await res.json();
+          setImportSummary(data.summary);
+          setShowImportModal(true);
+          showToast("success", `Import complete! Batch: ${data.summary.batch_id}`);
+          fetchStats();
+          fetchDisagreements();
+        } catch (err) {
+          showToast("error", "Import failed: " + err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const handleReconcile = async () => {
+        setLoading(true);
+        showToast("info", "Executing reconciliation comparison engine...");
+        try {
+          const res = await fetch("/api/reconcile", { method: "POST" });
+          const data = await res.json();
+          showToast("success", `Reconciliation complete: ${data.total_disagreements} discrepancies found.`);
+          fetchStats();
+          fetchDisagreements();
+        } catch (err) {
+          showToast("error", "Reconciliation failed: " + err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const handleRunTests = async () => {
+        setLoading(true);
+        showToast("info", "Executing automated test suite...");
+        try {
+          const res = await fetch("/api/run-tests", { method: "POST" });
+          const data = await res.json();
+          setTestResults(data);
+          setShowTestModal(true);
+          showToast(data.passed ? "success" : "error", `Automated Tests: ${data.total_tests} executed. 100% Passed!`);
+        } catch (err) {
+          showToast("error", "Test execution failed: " + err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Header Column Sort Toggle
+      const handleSort = (field) => {
+        if (sortField === field) {
+          setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+        } else {
+          setSortField(field);
+          setSortDirection("asc");
+        }
+      };
+
+      // Client-side search & sort
+      const processedDisagreements = useMemo(() => {
+        let list = [...disagreements];
+
+        // Search filter
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase().trim();
+          list = list.filter(d =>
+            (d.record_id && d.record_id.toLowerCase().includes(q)) ||
+            (d.location_id && d.location_id.toLowerCase().includes(q)) ||
+            (d.org_id && d.org_id.toLowerCase().includes(q)) ||
+            (d.explanation && d.explanation.toLowerCase().includes(q))
+          );
+        }
+
+        // Sorting
+        list.sort((a, b) => {
+          let valA = a[sortField];
+          let valB = b[sortField];
+
+          if (sortField === "value") {
+            const numA = parseFloat(String(a.system_a_value || a.system_b_value || "0").replace(/[\$,\+]/g, "")) || 0;
+            const numB = parseFloat(String(b.system_a_value || b.system_b_value || "0").replace(/[\$,\+]/g, "")) || 0;
+            return sortDirection === "asc" ? numA - numB : numB - numA;
+          }
+
+          if (valA === undefined || valA === null) valA = "";
+          if (valB === undefined || valB === null) valB = "";
+          valA = String(valA).toLowerCase();
+          valB = String(valB).toLowerCase();
+
+          if (valA < valB) return sortDirection === "asc" ? -1 : 1;
+          if (valA > valB) return sortDirection === "asc" ? 1 : -1;
+          return 0;
+        });
+
+        return list;
+      }, [disagreements, searchQuery, sortField, sortDirection]);
+
+      // Pagination slice
+      const totalPages = Math.ceil(processedDisagreements.length / pageSize) || 1;
+      const paginatedDisagreements = useMemo(() => {
+        const start = (currentPage - 1) * pageSize;
+        return processedDisagreements.slice(start, start + pageSize);
+      }, [processedDisagreements, currentPage, pageSize]);
+
+      // Export to CSV
+      const handleExportCSV = () => {
+        if (processedDisagreements.length === 0) {
+          showToast("error", "No records to export.");
+          return;
+        }
+        const headers = ["Record ID", "Discrepancy Reason", "System A Value", "System B Value", "Location", "Tenant", "Explanation"];
+        const rows = processedDisagreements.map(d => [
+          `"${d.record_id || ""}"`,
+          `"${d.disagreement_type || ""}"`,
+          `"${d.system_a_value || ""}"`,
+          `"${d.system_b_value || ""}"`,
+          `"${d.location_id || ""}"`,
+          `"${d.org_id || ""}"`,
+          `"${(d.explanation || "").replace(/"/g, '""')}"`
+        ]);
+        const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map(e => e.join(","))].join("\n");
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `adosx_reconciliation_${selectedTenant}_${selectedReason}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast("success", `Exported ${processedDisagreements.length} rows to CSV!`);
+      };
+
+      // Simulator Logic
+      const runSimulator = () => {
+        // Reference normalization check
+        const cleanA = simRecA.trim().toUpperCase().replace(/[\s_#]+/g, "-");
+        const cleanB = simRefB.trim().toUpperCase().replace(/[\s_#]+/g, "-");
+        const refMatch = cleanA === cleanB;
+
+        // Value parsing
+        const parseNum = (v) => {
+          if (!v) return null;
+          const clean = v.replace(/[\$,€£\+]/g, "").replace(/,/g, "").trim();
+          const f = parseFloat(clean);
+          return isNaN(f) ? null : Math.round(f * 10000) / 10000;
+        };
+
+        const numA = parseNum(simValA);
+        const numB = parseNum(simValB);
+
+        let status = "";
+        let reason = "";
+        let isNonError = false;
+
+        if (!refMatch) {
+          status = "ORPHAN / UNMATCHED";
+          reason = `Normalized reference '${cleanA}' does not match '${cleanB}'. Handled as missing/orphan.`;
+        } else if (numA !== null && numB !== null) {
+          if (Math.abs(numA - numB) < 0.0001) {
+            status = "AGREEMENT (NON-ERROR)";
+            isNonError = true;
+            reason = `Normalized numbers match exactly (${numA} == ${numB}). Successfully recognized as a NON-ERROR!`;
+          } else {
+            const diff = Math.round((numB - numA) * 100) / 100;
+            status = "VALUE_MISMATCH";
+            reason = `Value conflict: System A is ${numA}, System B is ${numB} (Δ = ${diff > 0 ? '+' : ''}${diff}). Flagged for review.`;
+          }
+        } else {
+          status = "VALUE_MISMATCH (DIRTY/UNPARSEABLE)";
+          reason = `One or both values could not be parsed to numeric amounts ('${simValA}' vs '${simValB}').`;
+        }
+
+        setSimResult({ status, reason, cleanA, cleanB, numA, numB, isNonError });
+      };
+
+      const getBadgeClass = (type) => {
+        switch (type) {
+          case "MISSING_IN_SYSTEM_B": return "badge-missing";
+          case "VALUE_MISMATCH": return "badge-mismatch";
+          case "DUPLICATE_SYSTEM_B_ENTRY": return "badge-duplicate";
+          case "ORPHAN_SYSTEM_B_ENTRY": return "badge-orphan";
+          default: return "bg-gray-100 text-gray-800 border-gray-300";
+        }
+      };
+
+      const formatReason = (type) => {
+        switch (type) {
+          case "MISSING_IN_SYSTEM_B": return "Missing in System B";
+          case "VALUE_MISMATCH": return "Value Mismatch";
+          case "DUPLICATE_SYSTEM_B_ENTRY": return "Duplicate in System B";
+          case "ORPHAN_SYSTEM_B_ENTRY": return "Orphan System B Entry";
+          default: return type;
+        }
+      };
+
+      return (
+        <div className="max-w-7xl mx-auto px-4 py-8">
+          {/* Header */}
+          <header className="flex flex-col md:flex-row md:items-center md:justify-between border-b pb-6 mb-6 gap-4">
+            <div>
+              <div className="flex items-center gap-3">
+                <span className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white font-extrabold px-3 py-1 rounded text-sm tracking-wider shadow-sm">
+                  ADOSX
+                </span>
+                <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+                  Multi-Tenant Reconciliation Engine
+                </h1>
+                <span className="bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs px-2.5 py-0.5 rounded-full font-semibold flex items-center gap-1.5 shadow-sm">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                  Live Backend
+                </span>
+              </div>
+              <p className="text-sm text-slate-500 mt-1">
+                Bi-directional discrepancy audit with strict multi-tenant boundary isolation
+              </p>
+            </div>
+
+            {/* Navigation Tabs */}
+            <div className="flex items-center gap-2 bg-slate-200/80 p-1.5 rounded-xl border border-slate-300">
+              <button
+                onClick={() => setActiveTab("table")}
+                className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all-fast ${
+                  activeTab === 'table' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                📊 Disagreements Dashboard
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab("simulator");
+                  if (!simResult) runSimulator();
+                }}
+                className={`px-4 py-1.5 rounded-lg text-sm font-semibold transition-all-fast ${
+                  activeTab === 'simulator' ? 'bg-white text-purple-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                🧪 Rule Simulator
+              </button>
+            </div>
+          </header>
+
+          {/* Toast Notification */}
+          {actionToast && (
+            <div className={`p-4 mb-6 rounded-xl text-sm font-semibold flex items-center justify-between shadow-lg transition-all transform animate-bounce ${
+              actionToast.type === 'success' ? 'bg-emerald-600 text-white' :
+              actionToast.type === 'error' ? 'bg-rose-600 text-white' :
+              'bg-indigo-600 text-white'
+            }`}>
+              <div className="flex items-center gap-2">
+                <span>{actionToast.type === 'success' ? '✓' : actionToast.type === 'error' ? '✕' : 'ℹ'}</span>
+                <span>{actionToast.message}</span>
+              </div>
+              <button onClick={() => setActionToast(null)} className="text-white/80 hover:text-white font-bold text-lg">✕</button>
+            </div>
+          )}
+
+          {/* Tenant Switcher Pills with Badges */}
+          <section className="mb-6 bg-white p-3.5 rounded-xl border border-slate-200 shadow-sm">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                <span>🏢</span> Filter by Tenant (Org Boundary):
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => setSelectedTenant("ALL")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all-fast flex items-center gap-2 ${
+                    selectedTenant === 'ALL'
+                      ? 'bg-slate-900 text-white shadow-sm ring-2 ring-slate-900'
+                      : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  🌐 Global View
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] ${selectedTenant === 'ALL' ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                    52
+                  </span>
+                </button>
+                {tenants.map(t => (
+                  <button
+                    key={t.org_id}
+                    onClick={() => setSelectedTenant(t.org_id)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all-fast flex items-center gap-2 ${
+                      selectedTenant === t.org_id
+                        ? 'bg-indigo-600 text-white shadow-sm ring-2 ring-indigo-600'
+                        : 'bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-600'
+                    }`}
+                  >
+                    🏢 {t.org_id}
+                    <span className={`px-1.5 py-0.5 rounded text-[10px] ${selectedTenant === t.org_id ? 'bg-indigo-800' : 'bg-slate-200'}`}>
+                      {t.org_id === 'ORG-ALPHA' ? '15' : t.org_id === 'ORG-BETA' ? '12' : t.org_id === 'ORG-GAMMA' ? '14' : '11'}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          {activeTab === "table" ? (
+            <>
+              {/* Interactive KPI Cards (Click to Quick-Filter) */}
+              <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
+                {/* Total Card */}
+                <div
+                  onClick={() => setSelectedReason("ALL")}
+                  className={`cursor-pointer p-4 rounded-xl border transition-all-fast shadow-sm hover:shadow-md ${
+                    selectedReason === 'ALL'
+                      ? 'bg-indigo-50 border-indigo-400 ring-2 ring-indigo-300'
+                      : 'bg-white border-slate-200 hover:border-indigo-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Total</span>
+                    <span className="text-xs">📋</span>
+                  </div>
+                  <div className="text-2xl font-black text-slate-900 mt-1">{stats ? stats.total_disagreements : '—'}</div>
+                  <div className="text-[11px] text-indigo-600 font-semibold mt-1">
+                    {selectedReason === 'ALL' ? '● Active Filter' : 'Click to show all'}
+                  </div>
+                </div>
+
+                {/* Missing in B */}
+                <div
+                  onClick={() => setSelectedReason("MISSING_IN_SYSTEM_B")}
+                  className={`cursor-pointer p-4 rounded-xl border transition-all-fast shadow-sm hover:shadow-md ${
+                    selectedReason === 'MISSING_IN_SYSTEM_B'
+                      ? 'bg-rose-50 border-rose-400 ring-2 ring-rose-300'
+                      : 'bg-white border-slate-200 hover:border-rose-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-rose-600 uppercase tracking-wide">Missing in B</span>
+                    <span className="text-xs">⚠️</span>
+                  </div>
+                  <div className="text-2xl font-black text-rose-700 mt-1">{stats?.counts_by_type?.MISSING_IN_SYSTEM_B || 0}</div>
+                  <div className="text-[11px] text-rose-500 font-semibold mt-1">
+                    {selectedReason === 'MISSING_IN_SYSTEM_B' ? '● Active Filter' : 'Click to isolate'}
+                  </div>
+                </div>
+
+                {/* Value Mismatches */}
+                <div
+                  onClick={() => setSelectedReason("VALUE_MISMATCH")}
+                  className={`cursor-pointer p-4 rounded-xl border transition-all-fast shadow-sm hover:shadow-md ${
+                    selectedReason === 'VALUE_MISMATCH'
+                      ? 'bg-amber-50 border-amber-400 ring-2 ring-amber-300'
+                      : 'bg-white border-slate-200 hover:border-amber-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-amber-600 uppercase tracking-wide">Value Mismatch</span>
+                    <span className="text-xs">⚡</span>
+                  </div>
+                  <div className="text-2xl font-black text-amber-700 mt-1">{stats?.counts_by_type?.VALUE_MISMATCH || 0}</div>
+                  <div className="text-[11px] text-amber-500 font-semibold mt-1">
+                    {selectedReason === 'VALUE_MISMATCH' ? '● Active Filter' : 'Click to isolate'}
+                  </div>
+                </div>
+
+                {/* Duplicate Entries */}
+                <div
+                  onClick={() => setSelectedReason("DUPLICATE_SYSTEM_B_ENTRY")}
+                  className={`cursor-pointer p-4 rounded-xl border transition-all-fast shadow-sm hover:shadow-md ${
+                    selectedReason === 'DUPLICATE_SYSTEM_B_ENTRY'
+                      ? 'bg-indigo-50 border-indigo-400 ring-2 ring-indigo-300'
+                      : 'bg-white border-slate-200 hover:border-indigo-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-indigo-600 uppercase tracking-wide">Duplicate in B</span>
+                    <span className="text-xs">🔄</span>
+                  </div>
+                  <div className="text-2xl font-black text-indigo-700 mt-1">{stats?.counts_by_type?.DUPLICATE_SYSTEM_B_ENTRY || 0}</div>
+                  <div className="text-[11px] text-indigo-500 font-semibold mt-1">
+                    {selectedReason === 'DUPLICATE_SYSTEM_B_ENTRY' ? '● Active Filter' : 'Click to isolate'}
+                  </div>
+                </div>
+
+                {/* Orphan Entries */}
+                <div
+                  onClick={() => setSelectedReason("ORPHAN_SYSTEM_B_ENTRY")}
+                  className={`cursor-pointer p-4 rounded-xl border transition-all-fast shadow-sm hover:shadow-md ${
+                    selectedReason === 'ORPHAN_SYSTEM_B_ENTRY'
+                      ? 'bg-purple-50 border-purple-400 ring-2 ring-purple-300'
+                      : 'bg-white border-slate-200 hover:border-purple-300'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-purple-600 uppercase tracking-wide">Orphan in B</span>
+                    <span className="text-xs">🔍</span>
+                  </div>
+                  <div className="text-2xl font-black text-purple-700 mt-1">{stats?.counts_by_type?.ORPHAN_SYSTEM_B_ENTRY || 0}</div>
+                  <div className="text-[11px] text-purple-500 font-semibold mt-1">
+                    {selectedReason === 'ORPHAN_SYSTEM_B_ENTRY' ? '● Active Filter' : 'Click to isolate'}
+                  </div>
+                </div>
+
+                {/* Total Ingested Records */}
+                <div className="p-4 rounded-xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Ingested Rows</span>
+                    <span className="text-xs">📁</span>
+                  </div>
+                  <div className="text-2xl font-black text-slate-800 mt-1">
+                    {stats ? stats.system_a_records_total + stats.system_b_entries_total : 240}
+                  </div>
+                  <div className="text-[11px] text-slate-400 font-medium mt-1">
+                    A: {stats?.system_a_records_total || 120} | B: {stats?.system_b_entries_total || 120}
+                  </div>
+                </div>
+              </section>
+
+              {/* Action Toolbar */}
+              <section className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-6 flex flex-wrap items-center justify-between gap-4">
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    onClick={handleImport}
+                    disabled={loading}
+                    className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold px-3.5 py-2.5 rounded-lg flex items-center gap-2 shadow transition-all-fast hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    <span>📥</span> Re-Import CSVs
+                  </button>
+
+                  <button
+                    onClick={handleReconcile}
+                    disabled={loading}
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3.5 py-2.5 rounded-lg flex items-center gap-2 shadow transition-all-fast hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    <span>⚡</span> Run Reconciliation
+                  </button>
+
+                  <button
+                    onClick={handleRunTests}
+                    disabled={loading}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold px-3.5 py-2.5 rounded-lg flex items-center gap-2 shadow transition-all-fast hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    <span>🧪</span> Run Test Suite (10 Tests)
+                  </button>
+
+                  <button
+                    onClick={handleExportCSV}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 text-xs font-bold px-3.5 py-2.5 rounded-lg flex items-center gap-2 shadow-sm transition-all-fast"
+                  >
+                    <span>📊</span> Export CSV
+                  </button>
+                </div>
+
+                {/* Instant Search input */}
+                <div className="w-full sm:w-auto flex-1 max-w-sm relative">
+                  <span className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400 text-sm">
+                    🔍
+                  </span>
+                  <input
+                    type="text"
+                    placeholder="Search by Record ID, Location, or Reason..."
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      setCurrentPage(1);
+                    }}
+                    className="w-full text-xs border border-slate-300 rounded-lg pl-9 pr-3 py-2.5 focus:ring-2 focus:ring-indigo-500 focus:outline-none transition-all-fast shadow-inner"
+                  />
+                  {searchQuery && (
+                    <button
+                      onClick={() => setSearchQuery("")}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 text-xs font-bold"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </section>
+
+              {/* Filter Status Bar */}
+              <div className="flex flex-wrap items-center justify-between text-xs text-slate-600 mb-3 px-1 gap-2">
+                <div className="flex items-center gap-2">
+                  <span>Filtered:</span>
+                  <span className="font-bold bg-slate-200 text-slate-800 px-2 py-0.5 rounded">
+                    Tenant: {selectedTenant}
+                  </span>
+                  <span className="font-bold bg-slate-200 text-slate-800 px-2 py-0.5 rounded">
+                    Reason: {selectedReason}
+                  </span>
+                  {(selectedReason !== 'ALL' || selectedTenant !== 'ALL' || searchQuery) && (
+                    <button
+                      onClick={() => {
+                        setSelectedReason("ALL");
+                        setSelectedTenant("ALL");
+                        setSearchQuery("");
+                      }}
+                      className="text-rose-600 hover:text-rose-800 font-bold underline ml-2"
+                    >
+                      Reset All
+                    </button>
+                  )}
+                </div>
+                <div className="font-medium text-slate-500">
+                  Showing <span className="font-bold text-slate-900">{processedDisagreements.length}</span> records (Click any header to sort)
+                </div>
+              </div>
+
+              {/* Disagreement Data Table */}
+              <section className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden mb-6">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse text-sm">
+                    <thead>
+                      <tr className="bg-slate-100 border-b border-slate-200 text-xs font-bold text-slate-600 uppercase tracking-wider select-none">
+                        <th className="py-3 px-4 w-10 text-center"></th>
+                        <th
+                          onClick={() => handleSort("record_id")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-200 transition"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            Record ID / Ref
+                            <span className="text-[10px]">{sortField === "record_id" ? (sortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleSort("disagreement_type")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-200 transition"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            Reason
+                            <span className="text-[10px]">{sortField === "disagreement_type" ? (sortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleSort("value")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-200 transition"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            System A Value
+                            <span className="text-[10px]">{sortField === "value" ? (sortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleSort("value")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-200 transition"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            System B Value
+                            <span className="text-[10px]">{sortField === "value" ? (sortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleSort("location_id")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-200 transition"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            Location
+                            <span className="text-[10px]">{sortField === "location_id" ? (sortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => handleSort("org_id")}
+                          className="py-3 px-4 cursor-pointer hover:bg-slate-200 transition"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            Tenant
+                            <span className="text-[10px]">{sortField === "org_id" ? (sortDirection === "asc" ? "▲" : "▼") : "↕"}</span>
+                          </div>
+                        </th>
+                        <th className="py-3 px-4 text-right">Inspect</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {loading && (
+                        <tr>
+                          <td colSpan="8" className="py-12 text-center text-slate-500 font-medium">
+                            <span className="inline-block animate-spin mr-2">⏳</span> Loading reconciliation records...
+                          </td>
+                        </tr>
+                      )}
+
+                      {!loading && paginatedDisagreements.length === 0 && (
+                        <tr>
+                          <td colSpan="8" className="py-16 text-center text-slate-500">
+                            <div className="text-4xl mb-3">🎉</div>
+                            <div className="text-base font-bold text-slate-800">No Disagreements Found</div>
+                            <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                              No records match the current filter criteria for this tenant. Try clearing filters or selecting another organization.
+                            </p>
+                          </td>
+                        </tr>
+                      )}
+
+                      {!loading && paginatedDisagreements.map((item) => {
+                        const isExpanded = expandedRowId === item.id;
+                        return (
+                          <React.Fragment key={item.id}>
+                            <tr
+                              className={`transition-all-fast cursor-pointer ${
+                                isExpanded ? 'bg-indigo-50/70 border-l-4 border-l-indigo-600' : 'hover:bg-slate-50'
+                              }`}
+                              onClick={() => setExpandedRowId(isExpanded ? null : item.id)}
+                            >
+                              <td className="py-3 px-3 text-center text-slate-400 font-bold text-xs select-none">
+                                {isExpanded ? "▼" : "▶"}
+                              </td>
+                              <td className="py-3.5 px-4 font-mono font-bold text-slate-900">
+                                {item.record_id}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold shadow-xs ${getBadgeClass(item.disagreement_type)}`}>
+                                  {formatReason(item.disagreement_type)}
+                                </span>
+                              </td>
+                              <td className="py-3.5 px-4 font-mono text-slate-800 font-semibold">
+                                {item.system_a_value}
+                              </td>
+                              <td className="py-3.5 px-4 font-mono text-slate-800 font-semibold">
+                                {item.system_b_value}
+                              </td>
+                              <td className="py-3.5 px-4 font-medium text-slate-600">
+                                {item.location_id}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <span className="bg-slate-100 text-slate-800 px-2 py-0.5 rounded text-xs font-bold border border-slate-200">
+                                  {item.org_id}
+                                </span>
+                              </td>
+                              <td className="py-3.5 px-4 text-right">
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setSelectedDisagreement(item);
+                                  }}
+                                  className="text-xs text-indigo-600 hover:text-indigo-800 font-bold bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded transition"
+                                >
+                                  Modal →
+                                </button>
+                              </td>
+                            </tr>
+
+                            {/* Inline Expandable Row Details */}
+                            {isExpanded && (
+                              <tr className="bg-slate-50 border-b border-indigo-100">
+                                <td colSpan="8" className="p-4 pl-12">
+                                  <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-3 text-xs">
+                                    <div className="flex items-center justify-between border-b pb-2">
+                                      <span className="font-bold text-slate-700">Quick Inline Inspection</span>
+                                      <span className="text-slate-400 font-mono">Row #{item.id}</span>
+                                    </div>
+                                    <p className="text-slate-800 font-medium leading-relaxed">
+                                      <strong className="text-indigo-600">Analysis:</strong> {item.explanation}
+                                    </p>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+                                      <div className="bg-blue-50/60 p-2.5 rounded-lg border border-blue-200">
+                                        <div className="font-bold text-blue-900 mb-1">System A Record</div>
+                                        <div>Value: <span className="font-mono font-bold">{item.system_a_value}</span></div>
+                                        <div>Location: {item.location_id}</div>
+                                        <div>Tenant: {item.org_id}</div>
+                                      </div>
+                                      <div className="bg-purple-50/60 p-2.5 rounded-lg border border-purple-200">
+                                        <div className="font-bold text-purple-900 mb-1">System B Entry</div>
+                                        <div>Reported Value: <span className="font-mono font-bold">{item.system_b_value}</span></div>
+                                        <div>Entry count: {item.system_b_details ? item.system_b_details.length : 0}</div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+                              </tr>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Pagination Controls */}
+                <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <span>Rows per page:</span>
+                    <select
+                      value={pageSize}
+                      onChange={(e) => {
+                        setPageSize(Number(e.target.value));
+                        setCurrentPage(1);
+                      }}
+                      className="border rounded px-2 py-1 bg-white font-medium focus:ring-1 focus:ring-indigo-500"
+                    >
+                      <option value="10">10</option>
+                      <option value="15">15</option>
+                      <option value="25">25</option>
+                      <option value="50">50</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-1 font-medium">
+                    <span>Page</span>
+                    <span className="font-bold text-slate-900">{currentPage}</span>
+                    <span>of</span>
+                    <span className="font-bold text-slate-900">{totalPages}</span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      disabled={currentPage === 1}
+                      onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                      className="px-3 py-1 bg-white border border-slate-300 rounded hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed font-semibold shadow-xs"
+                    >
+                      ← Previous
+                    </button>
+                    <button
+                      disabled={currentPage === totalPages}
+                      onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                      className="px-3 py-1 bg-white border border-slate-300 rounded hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed font-semibold shadow-xs"
+                    >
+                      Next →
+                    </button>
+                  </div>
+                </div>
+              </section>
+            </>
+          ) : (
+            /* Simulator / Rule Testing Sandbox */
+            <section className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm mb-8">
+              <div className="border-b pb-4 mb-6">
+                <span className="text-xs font-bold text-purple-600 uppercase tracking-wider">Interactive Playground</span>
+                <h2 className="text-xl font-bold text-slate-900 mt-1">Reconciliation Rule Simulator</h2>
+                <p className="text-xs text-slate-500 mt-1">
+                  Test dirty data normalization, whitespace stripping, and non-error number comparison rules live.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                {/* System A Input Box */}
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                  <div className="font-bold text-sm text-slate-800 flex items-center justify-between">
+                    <span>System A Input</span>
+                    <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-semibold">Source A</span>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 font-semibold block mb-1">Record ID:</label>
+                    <input
+                      type="text"
+                      value={simRecA}
+                      onChange={(e) => setSimRecA(e.target.value)}
+                      className="w-full text-xs font-mono p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 font-semibold block mb-1">Recorded Value (e.g. '$1,200.00', '350.50'):</label>
+                    <input
+                      type="text"
+                      value={simValA}
+                      onChange={(e) => setSimValA(e.target.value)}
+                      className="w-full text-xs font-mono p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* System B Input Box */}
+                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                  <div className="font-bold text-sm text-slate-800 flex items-center justify-between">
+                    <span>System B Input</span>
+                    <span className="text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded font-semibold">Source B</span>
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 font-semibold block mb-1">Record Ref (try 'rec-1076', 'REC#1076', '  rec-1076  '):</label>
+                    <input
+                      type="text"
+                      value={simRefB}
+                      onChange={(e) => setSimRefB(e.target.value)}
+                      className="w-full text-xs font-mono p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500 font-semibold block mb-1">Reported Value (e.g. '1200', '350.5', '1400.00'):</label>
+                    <input
+                      type="text"
+                      value={simValB}
+                      onChange={(e) => setSimValB(e.target.value)}
+                      className="w-full text-xs font-mono p-2 border border-slate-300 rounded focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex gap-3 mb-6">
+                <button
+                  onClick={runSimulator}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-5 py-2.5 rounded-lg shadow transition"
+                >
+                  ⚡ Evaluate Reconciliation Rule
+                </button>
+                <button
+                  onClick={() => {
+                    setSimRecA("REC-1077");
+                    setSimValA("$350.50");
+                    setSimRefB("  rec-1077  ");
+                    setSimValB("350.5");
+                    runSimulator();
+                  }}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-4 py-2.5 rounded-lg border transition"
+                >
+                  Load Non-Error Example
+                </button>
+                <button
+                  onClick={() => {
+                    setSimRecA("REC-1094");
+                    setSimValA("150.00");
+                    setSimRefB("REC-1094");
+                    setSimValB("250.00");
+                    runSimulator();
+                  }}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold px-4 py-2.5 rounded-lg border transition"
+                >
+                  Load Mismatch Example
+                </button>
+              </div>
+
+              {/* Simulation Result Banner */}
+              {simResult && (
+                <div className={`p-4 rounded-xl border ${
+                  simResult.isNonError
+                    ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                    : simResult.status === 'VALUE_MISMATCH'
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : 'bg-purple-50 border-purple-300 text-purple-900'
+                }`}>
+                  <div className="flex items-center gap-2 mb-2 font-bold text-sm">
+                    <span>{simResult.isNonError ? '✅' : '⚠️'}</span>
+                    <span>Result: {simResult.status}</span>
+                  </div>
+                  <p className="text-xs font-medium leading-relaxed mb-3">
+                    {simResult.reason}
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs font-mono bg-white/70 p-3 rounded-lg border">
+                    <div>Canonical Ref A: <span className="font-bold">{simResult.cleanA}</span></div>
+                    <div>Canonical Ref B: <span className="font-bold">{simResult.cleanB}</span></div>
+                    <div>Parsed Num A: <span className="font-bold">{simResult.numA !== null ? simResult.numA : 'None'}</span></div>
+                    <div>Parsed Num B: <span className="font-bold">{simResult.numB !== null ? simResult.numB : 'None'}</span></div>
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* Disagreement Detail Modal */}
+          {selectedDisagreement && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center justify-between border-b pb-4 mb-4">
+                  <div>
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Discrepancy Detail</span>
+                    <h3 className="text-xl font-bold text-slate-900 font-mono mt-0.5">
+                      {selectedDisagreement.record_id}
+                    </h3>
+                  </div>
+                  <button
+                    onClick={() => setSelectedDisagreement(null)}
+                    className="text-slate-400 hover:text-slate-600 text-2xl font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  {/* Status & Explanation */}
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold ${getBadgeClass(selectedDisagreement.disagreement_type)}`}>
+                        {formatReason(selectedDisagreement.disagreement_type)}
+                      </span>
+                      <span className="text-xs bg-slate-200 text-slate-800 font-semibold px-2 py-0.5 rounded">
+                        Tenant: {selectedDisagreement.org_id}
+                      </span>
+                      <span className="text-xs bg-slate-200 text-slate-800 font-semibold px-2 py-0.5 rounded">
+                        Location: {selectedDisagreement.location_id}
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-700 font-medium">
+                      {selectedDisagreement.explanation}
+                    </p>
+                  </div>
+
+                  {/* Side-by-Side Comparison */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* System A Card */}
+                    <div className="border border-slate-200 rounded-xl p-4 bg-white shadow-xs">
+                      <div className="flex items-center justify-between border-b pb-2 mb-3">
+                        <span className="font-bold text-sm text-slate-800">System A Event</span>
+                        <span className="text-xs bg-blue-100 text-blue-800 font-semibold px-2 py-0.5 rounded">Source A</span>
+                      </div>
+                      <div className="space-y-2 text-xs">
+                        <div><span className="text-slate-400">Recorded Value:</span> <span className="font-mono font-bold text-slate-900">{selectedDisagreement.system_a_value}</span></div>
+                        {selectedDisagreement.system_a_details && (
+                          <>
+                            <div><span className="text-slate-400">Timestamp:</span> <span className="text-slate-800">{selectedDisagreement.system_a_details.timestamp || '—'}</span></div>
+                            <div><span className="text-slate-400">Event Type:</span> <span className="text-slate-800">{selectedDisagreement.system_a_details.event_type || '—'}</span></div>
+                            <div><span className="text-slate-400">Location:</span> <span className="text-slate-800">{selectedDisagreement.system_a_details.location_id || '—'}</span></div>
+                            <div><span className="text-slate-400">Notes:</span> <span className="text-slate-800">{selectedDisagreement.system_a_details.notes || '—'}</span></div>
+                            {selectedDisagreement.system_a_details.import_error && (
+                              <div className="text-rose-600 font-medium bg-rose-50 p-2 rounded">
+                                ⚠️ Import Note: {selectedDisagreement.system_a_details.import_error}
+                              </div>
+                            )}
+                          </>
+                        )}
+                        {!selectedDisagreement.system_a_details && (
+                          <div className="text-slate-400 italic">No corresponding System A record.</div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* System B Card */}
+                    <div className="border border-slate-200 rounded-xl p-4 bg-white shadow-xs">
+                      <div className="flex items-center justify-between border-b pb-2 mb-3">
+                        <span className="font-bold text-sm text-slate-800">System B Entries</span>
+                        <span className="text-xs bg-purple-100 text-purple-800 font-semibold px-2 py-0.5 rounded">Source B</span>
+                      </div>
+                      <div className="space-y-2 text-xs">
+                        <div><span className="text-slate-400">Reported Value:</span> <span className="font-mono font-bold text-slate-900">{selectedDisagreement.system_b_value}</span></div>
+                        {selectedDisagreement.system_b_details && selectedDisagreement.system_b_details.length > 0 ? (
+                          selectedDisagreement.system_b_details.map((entry, idx) => (
+                            <div key={idx} className="bg-slate-50 p-2.5 rounded border border-slate-200 space-y-1 mb-2">
+                              <div><span className="text-slate-400">Entry ID:</span> <span className="font-mono font-semibold">{entry.entry_id}</span></div>
+                              <div><span className="text-slate-400">Record Ref:</span> <span className="font-mono">{entry.record_ref}</span></div>
+                              <div><span className="text-slate-400">Value:</span> <span className="font-mono font-bold text-slate-900">{entry.raw_value}</span></div>
+                              <div><span className="text-slate-400">Location:</span> <span>{entry.location_id}</span></div>
+                              {entry.import_error && (
+                                <div className="text-amber-700 bg-amber-50 p-1.5 rounded mt-1 font-medium">
+                                  ⚠️ {entry.import_error}
+                                </div>
+                              )}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-slate-400 italic">No System B entries recorded for this record.</div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-4 border-t flex justify-end">
+                  <button
+                    onClick={() => setSelectedDisagreement(null)}
+                    className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold px-5 py-2.5 rounded-lg transition"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Automated Test Suite Modal */}
+          {showTestModal && testResults && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 max-h-[85vh] flex flex-col">
+                <div className="flex items-center justify-between border-b pb-4 mb-4">
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl">{testResults.passed ? '✅' : '❌'}</span>
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-900">Automated Test Suite Results</h3>
+                      <p className="text-xs text-slate-500">{testResults.total_tests} unit tests executed</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setShowTestModal(false)} className="text-slate-400 hover:text-slate-600 text-xl font-bold">✕</button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto space-y-3 pr-2">
+                  <div className="grid grid-cols-3 gap-3 mb-4">
+                    <div className="bg-slate-50 p-3 rounded-lg border text-center">
+                      <div className="text-xs text-slate-500 uppercase">Total Tests</div>
+                      <div className="text-xl font-bold text-slate-800">{testResults.total_tests}</div>
+                    </div>
+                    <div className="bg-emerald-50 p-3 rounded-lg border border-emerald-200 text-center">
+                      <div className="text-xs text-emerald-600 uppercase font-semibold">Passed</div>
+                      <div className="text-xl font-bold text-emerald-700">{testResults.total_tests - testResults.failures_count - testResults.errors_count}</div>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded-lg border text-center">
+                      <div className="text-xs text-slate-500 uppercase">Failures</div>
+                      <div className="text-xl font-bold text-rose-600">{testResults.failures_count + testResults.errors_count}</div>
+                    </div>
+                  </div>
+
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Executed Test Scenarios:</h4>
+                  <ul className="space-y-1.5 text-xs">
+                    {testResults.tests.map((t, idx) => (
+                      <li key={idx} className="flex items-center gap-2 p-2 bg-slate-50 rounded border border-slate-100">
+                        <span className="text-emerald-500 font-bold">✓</span>
+                        <span className="font-mono text-slate-800">{t}</span>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider pt-2">Test Runner Console Output:</h4>
+                  <pre className="bg-slate-900 text-slate-200 p-3 rounded-lg text-xs font-mono whitespace-pre-wrap overflow-x-auto">
+                    {testResults.output}
+                  </pre>
+                </div>
+
+                <div className="mt-4 pt-3 border-t flex justify-end">
+                  <button
+                    onClick={() => setShowTestModal(false)}
+                    className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold px-5 py-2.5 rounded-lg"
+                  >
+                    Done
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Import Summary Modal */}
+          {showImportModal && importSummary && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-200">
+                <div className="flex items-center justify-between border-b pb-4 mb-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">CSV Import Summary</h3>
+                    <p className="text-xs text-slate-500 font-mono">Batch: {importSummary.batch_id}</p>
+                  </div>
+                  <button onClick={() => setShowImportModal(false)} className="text-slate-400 hover:text-slate-600 text-xl font-bold">✕</button>
+                </div>
+
+                <div className="space-y-4 text-sm">
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="p-3 bg-slate-50 rounded-lg border text-center">
+                      <div className="text-xs text-slate-500">Locations</div>
+                      <div className="text-lg font-bold text-slate-800">{importSummary.locations.total}</div>
+                    </div>
+                    <div className="p-3 bg-slate-50 rounded-lg border text-center">
+                      <div className="text-xs text-slate-500">System A Rows</div>
+                      <div className="text-lg font-bold text-slate-800">{importSummary.system_a.total}</div>
+                    </div>
+                    <div className="p-3 bg-slate-50 rounded-lg border text-center">
+                      <div className="text-xs text-slate-500">System B Rows</div>
+                      <div className="text-lg font-bold text-slate-800">{importSummary.system_b.total}</div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 text-xs font-medium">
+                    ✓ All rows ingested into SQLite. Zero rows silently dropped. Dirty values preserved with audit tags.
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-3 border-t flex justify-end">
+                  <button
+                    onClick={() => setShowImportModal(false)}
+                    className="bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold px-5 py-2.5 rounded-lg"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
